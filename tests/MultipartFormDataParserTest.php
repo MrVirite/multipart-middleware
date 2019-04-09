@@ -193,4 +193,39 @@ class MultipartFormDataParserTest extends TestCase
         ];
         $this->assertEquals($expectedBodyParams, $bodyParams);
     }
+    
+    public function estParseHugeData()
+    {
+        ini_set('memory_limit', '8M');
+        $parser = new MultipartFormDataParser();
+        $parser->setUploadFileMaxSize(1024*1024 * 32);
+        
+        $boundary = '---------------------------22472926011618';
+        $contentType = 'multipart/form-data; boundary=' . $boundary;
+        
+        $stream = tmpfile();
+        fwrite($stream, "--{$boundary}\nContent-Disposition: form-data; name=\"someFile\"; filename=\"some-file.txt\"\nContent-Type: application/octet-stream\r\n\r\n");
+        $length = 0;
+        while ($length < 1024 * 1024 * 42) {
+            fwrite($stream, chr(random_int(0, 255)));
+            $length++;
+        }
+        fwrite($stream, "\r\n");
+        fwrite($stream, "--{$boundary}--");
+        
+        $request = $this->createRequest(['content-type' => [$contentType]], $stream);
+        
+        $parsedRequest = $parser->parse($request);
+        
+        $uploadedFiles = $parsedRequest->files->all();
+        
+        $this->assertNotEmpty($uploadedFiles['someFile']);
+        /* @var $uploadedFile UploadedFile */
+        $uploadedFile = $uploadedFiles['someFile'];
+        $this->assertInstanceOf(UploadedFile::class, $uploadedFile);
+        $this->assertEquals(UPLOAD_ERR_OK, $uploadedFile->getError());
+        $this->assertEquals('some-file.txt', $uploadedFile->getClientOriginalName());
+        $this->assertEquals('application/octet-stream', $uploadedFile->getClientMimeType());
+    }
+    
 }

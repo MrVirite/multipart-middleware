@@ -149,24 +149,21 @@ class MultipartFormDataParser
             return $request;
         }
         $boundary = $matches[1];
-
-        $rawBody = $request->getContent();
-        if (empty($rawBody)) {
-            return $request;
-        }
-
-        $bodyParts = preg_split('/\\R?-+' . preg_quote($boundary, '/') . '/s', $rawBody);
-        array_pop($bodyParts); // last block always has no data, contains boundary ending like `--`
-
+    
+        $rawBodyStream = $request->getContent(true);
+    
         $bodyParams = [];
         $uploadedFiles = [];
         $filesCount = 0;
-        foreach ($bodyParts as $bodyPart) {
-            if (empty($bodyPart)) {
-                continue;
-            }
-
-            [$headers, $value] = preg_split('/\\R\\R/', $bodyPart, 2);
+    
+    
+        do {
+            $headers = '';
+            do {
+                $chunk = fgets($rawBodyStream);
+                $headers .= $chunk;
+            } while ($chunk !== "\r\n" && $chunk !== false);
+        
             $headers = $this->parseHeaders($headers);
 
             if (! isset($headers['content-disposition']['name'])) {
@@ -181,32 +178,50 @@ class MultipartFormDataParser
 
                 $clientFilename = $headers['content-disposition']['filename'];
                 $clientMediaType = Arr::get($headers, 'content-type', 'application/octet-stream');
-                $size = mb_strlen($value, '8bit');
                 $error = UPLOAD_ERR_OK;
                 $tempFilename = '';
-
-                if ($size > $this->getUploadFileMaxSize()) {
-                    $error = UPLOAD_ERR_INI_SIZE;
+                
+                $tmpResource = tmpfile();
+        
+                if ($tmpResource === false) {
+                    $error = UPLOAD_ERR_CANT_WRITE;
                 } else {
-                    $tmpResource = tmpfile();
-
-                    if ($tmpResource === false) {
+                    $tmpResourceMetaData = stream_get_meta_data($tmpResource);
+                    $tmpFileName = $tmpResourceMetaData['uri'];
+            
+                    if (empty($tmpFileName)) {
                         $error = UPLOAD_ERR_CANT_WRITE;
+                        @fclose($tmpResource);
                     } else {
-                        $tmpResourceMetaData = stream_get_meta_data($tmpResource);
-                        $tmpFileName = $tmpResourceMetaData['uri'];
-
-                        if (empty($tmpFileName)) {
-                            $error = UPLOAD_ERR_CANT_WRITE;
-                            @fclose($tmpResource);
-                        } else {
-                            fwrite($tmpResource, $value);
-                            $tempFilename = $tmpFileName;
-                            $this->tmpFileResources[] = $tmpResource; // save file resource, otherwise it will be deleted
+                        do {
+                            $value = fgets($rawBodyStream);
+                            
+                            // Handle boundary
+                            $eof = strrpos($value,'--'.$boundary);
+                            if($eof!==false){
+                                $value =  substr($value, 0, strrpos($value,'--'.$boundary));
+                                fwrite($tmpResource, $value);
+                                break;
+                            }
+                            else {
+                                fwrite($tmpResource, $value);
+                            }
+                        } while($value !== false);
+    
+    
+                        if (ftell($tmpResource) > $this->getUploadFileMaxSize()) {
+                            $error = UPLOAD_ERR_INI_SIZE;
                         }
+                        
+                        // trim trailing newline
+                        ftruncate($tmpResource, ftell($tmpResource)-2);
+                        
+                        $tempFilename = $tmpFileName;
+                        $this->tmpFileResources[] = $tmpResource; // save file resource, otherwise it will be deleted
                     }
                 }
-
+                
+        
                 $this->addValue(
                     $uploadedFiles,
                     $headers['content-disposition']['name'],
@@ -217,13 +232,15 @@ class MultipartFormDataParser
                         $error
                     )
                 );
-
+        
                 $filesCount++;
             } else {
-                // regular parameter:
-                $this->addValue($bodyParams, $headers['content-disposition']['name'], $value);
+                // regular parameter,trim trailing newline:
+                $value = fgets($rawBodyStream);
+                $this->addValue($bodyParams, $headers['content-disposition']['name'], substr($value, 0, -2));
             }
-        }
+            
+        } while (!feof($rawBodyStream));
 
         return $this->newRequest($request, $bodyParams, $uploadedFiles);
     }
